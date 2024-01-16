@@ -1,0 +1,146 @@
+import pandas as pd
+import numpy as np
+import requests
+import json
+import time as tm
+import math
+import networkx as nx
+import matplotlib.pyplot as plt
+from tkinter import filedialog
+import pycountry
+
+path = "C:/Users/vernhes/OneDrive - ENSTA Paris/Bureau/Sideproject/Data4/"
+dfirm = pd.read_excel(f"{path}df_2000_Green_Clean_Tech_Compagnies.xlsx")
+dfund_usd = pd.read_csv(f"{path}dfund_usd.csv")
+df_pers = pd.read_excel(f"{path}df_pers.xlsx")
+
+# Fonction pour extraire la dernière partie après la dernière virgule
+def extract_last_part(location):
+    parts = location.split(',')
+    if parts:  # Vérifier si la liste n'est pas vide
+        return parts[-1].strip()  # Enlever les espaces de début et de fin
+    return location  # Retourner la chaîne originale si elle ne contient pas de virgule
+
+# Appliquer la fonction à chaque ligne de la colonne 'location'
+dfirm['Headquarters Location'] = dfirm['Headquarters Location'].astype(str)
+dfirm['Jurisdiction'] = dfirm['Headquarters Location'].apply(extract_last_part)
+for i in range(0, len(dfirm)):
+    print(f"{i}")
+    try:
+        dfirm['Jurisdiction'][i] = pycountry.countries.search_fuzzy(dfirm['Jurisdiction'][i])[0].alpha_2
+    except:
+        i+=1
+
+from dateutil import parser
+import datetime
+# Fonction pour convertir chaque entrée en année
+def extract_year(date):
+    if isinstance(date, int):  # Si c'est déjà un entier, c'est déjà une année
+        return date
+    elif isinstance(date, str):  # Si c'est une chaîne, analyser la date pour extraire l'année
+        return parser.parse(date).year
+    elif isinstance(date, datetime.datetime):  # Si c'est un objet datetime, obtenir l'année directement
+        return date.year
+
+# Appliquer la fonction à chaque élément de la liste et éliminer les doublons
+dfirm['Founding Year'] = company_date = [extract_year(date) for date in dfirm['Founded Date']]
+
+v = 10
+company_name = dfirm['Organization Name'][:v].str.upper().tolist()
+company_nat = dfirm['Jurisdiction'][:v].str.upper().tolist()
+company_date = dfirm['Founding Year'][:v].tolist()
+
+dt = []
+data = []
+is_company_data = []
+df = pd.DataFrame([])
+t1 = tm.time()
+lens_api_url = 'https://api.lens.org/patent/search'
+headers = {'Authorization': 'Bearer tW5ZcjkE4q9ye8vvT8ByAfTa0LGFVoVSOZh4bDtg4DzKohRwES6N','Content-Type': 'application/json'}
+size = 100
+
+# Correction 2 : Utiliser `enumerate` pour avoir à la fois l'indice et la valeur de `company_name`
+for j, name in enumerate(company_name):
+    print(f'Patent extraction : {j} on {len(company_name)}')
+    payload = {
+        "query": {
+            "bool": {
+                "must": [
+                    {
+                        "match_phrase": {
+                            "applicant.name": company_name[j]
+                        }
+                    },
+                    {
+                        "term": {
+                            "jurisdiction": company_nat[j]
+                        }
+                    },
+                    {
+                        "range": {
+                            "year_published": {
+                                "gte": company_date[j]
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+    }
+    try:
+        response = requests.post(lens_api_url, data=json.dumps(payload),headers=headers)
+
+        if response.status_code == 200:  # Correction 7 : Vérifier si le status code est 200 (OK)
+            res_json = response.json()
+            data += res_json['data']
+            is_company_data.append(1)
+            _scroll_id = res_json.get('scroll_id')  # Correction 8 : Utiliser get() pour éviter KeyError si 'scroll_id' n'existe pas
+            print(f'Tout est bon !')
+            # Section de pagination
+            # Correction 9 : Ce code devrait être dans le bloc 'if' précédent car il dépend de la réponse initiale
+            if res_json['total'] > size:
+                rows = []
+                n = math.ceil(res_json['total'] / size)  # Correction 10 : Utiliser ceil pour s'assurer d'inclure toutes les pages
+                for i in range(n):
+                    print(f'Scrolling {i + 1} sur {n} :')
+                    scroll_payload = json.dumps({
+                        'scroll': '5m',
+                        'scroll_id': _scroll_id
+                    })
+                    scroll_res = requests.post(
+                        lens_api_url,
+                        data=scroll_payload,
+                        headers=headers
+                    )
+                    if scroll_res.status_code == 200 :
+                        items = scroll_res.json()['data']
+                        tm.sleep(4.5)  # Sleep for 4.5 seconds
+                        rows += items
+                    else : data += rows
+                # Correction 13 : Vérification de doublons après la collecte de toutes les données
+                if len({item['lens_id'] for item in data}) != res_json['total']:
+                    print(f'/!\ Valeurs manquantes')
+                else:
+                    print(f'Extraction complète')
+                dt += data
+            else:
+                dt += data
+
+        else:
+            print('Pas de résultat, erreur', response.status_code)
+            data = []
+            dt += data
+            is_company_data.append(0)
+            res_json = []
+            _scroll_id = None
+
+    except Exception as e:
+        print('Error:', e)
+    df_t = pd.DataFrame(data)
+    df_t['comp_name'] = company_name[j]
+    df = pd.concat([df,df_t])
+
+t2 = tm.time()
+print(f'Temps total extraction : {(t2 - t1) / 60:.2f} min')
+
+df.to_csv(f'{path}/df_B_GrenTech2.csv')
