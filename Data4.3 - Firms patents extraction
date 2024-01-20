@@ -8,6 +8,8 @@ import networkx as nx
 import matplotlib.pyplot as plt
 from tkinter import filedialog
 import pycountry
+from datetime import datetime
+from dateutil import parser
 
 path = "C:/Users/vernhes/OneDrive - ENSTA Paris/Bureau/Sideproject/Data4/"
 dfirm = pd.read_excel(f"{path}df_2000_Green_Clean_Tech_Compagnies.xlsx")
@@ -45,10 +47,11 @@ def extract_year(date):
 # Appliquer la fonction à chaque élément de la liste et éliminer les doublons
 dfirm['Founding Year'] = company_date = [extract_year(date) for date in dfirm['Founded Date']]
 
-v = 10
-company_name = dfirm['Organization Name'][:v].str.upper().tolist()
-company_nat = dfirm['Jurisdiction'][:v].str.upper().tolist()
-company_date = dfirm['Founding Year'][:v].tolist()
+V = 1000 ; v = 2300
+company_name = dfirm['Organization Name'][V:v].str.upper().tolist()
+company_nat = dfirm['Jurisdiction'][V:v].str.upper().tolist()
+company_date = dfirm['Founding Year'][V:v].fillna(2010).astype(int).tolist()
+company_date = [datetime(year, 1, 1).strftime("%Y-%m-%d") for year in company_date]
 
 dt = []
 data = []
@@ -78,14 +81,17 @@ for j, name in enumerate(company_name):
                     },
                     {
                         "range": {
-                            "year_published": {
-                                "gte": company_date[j]
+                            "earliest_priority_claim_date": {
+                                "gte": company_date[j],
+                                "lte": "2023-12-31"
                             }
                         }
                     }
                 ]
             }
-        }
+        },
+    "size": size,
+    "scroll": "5m",
     }
     try:
         response = requests.post(lens_api_url, data=json.dumps(payload),headers=headers)
@@ -114,11 +120,11 @@ for j, name in enumerate(company_name):
                     )
                     if scroll_res.status_code == 200 :
                         items = scroll_res.json()['data']
-                        tm.sleep(4.5)  # Sleep for 4.5 seconds
+                        tm.sleep(2)  # Sleep for 4.5 seconds
                         rows += items
                     else : data += rows
                 # Correction 13 : Vérification de doublons après la collecte de toutes les données
-                if len({item['lens_id'] for item in data}) != res_json['total']:
+                if len(rows) + res_json['results'] != res_json['total']:
                     print(f'/!\ Valeurs manquantes')
                 else:
                     print(f'Extraction complète')
@@ -139,8 +145,74 @@ for j, name in enumerate(company_name):
     df_t = pd.DataFrame(data)
     df_t['comp_name'] = company_name[j]
     df = pd.concat([df,df_t])
+    data = []
+    tm.sleep(4.2)
 
 t2 = tm.time()
 print(f'Temps total extraction : {(t2 - t1) / 60:.2f} min')
+requete_restante = int(response.headers._store['x-rate-limit-remaining-request-per-month'][1]) - n
+print(f'Nombre de requêtes restant ce mois-ci : {requete_restante} ')
 
-df.to_csv(f'{path}/df_B_GrenTech2.csv')
+df = df.reset_index(drop=True)
+
+#df.to_csv(f'{path}/df2_B_GrenTech_{V}_{v}.csv')
+
+df = pd.read_csv(f'{path}/df2_B_GrenTech_{V}_{v}.csv')
+df_B = df.copy()
+
+# Importation des différents df de données brevets extraites -----------------------------------------------------------
+
+df1 = pd.read_csv(f'{path}/df2_B_GrenTech_100.csv')
+df2 = pd.read_csv(f'{path}/df2_B_GrenTech_100_1000.csv')
+df3 = pd.read_csv(f'{path}/df2_B_GrenTech_1000_2300.csv')
+
+#Fusion des différentes bases extraites
+
+df_B = pd.concat([df1, df2, df3]).sort_values(by='lens_id').reset_index(drop=True)
+is_company_data = pd.DataFrame([is_company_data, company_name]).T
+
+df_B.to_csv(f'{path}/df2_B_GrenTech_full.csv')
+
+# Extraction des noms des acteurs : inv, app, et own ---
+inv_name = []
+for i in range(0, len(df_B)):
+    print(f'Extract {i + 1} sur {len(df_B)}')
+    try:
+        for j in range(0, len(eval(df_B['biblio'][i])['parties']['inventors'])):
+            try:
+                inv_name.append([df_B['lens_id'][i], eval(df_B['biblio'][i])['parties']['inventors'][j]['extracted_name']['value']])
+            except: j += 1 ; inv_name.append([df_B['lens_id'][i], np.nan])
+    except:
+        i += 1
+inv_name = pd.DataFrame(inv_name, columns=['lens_id', 'inv_name'])
+
+app_name = []
+for i in range(0, len(df_B)):
+    print(f'Extract {i + 1} sur {len(df_B)}')
+    try:
+        for j in range(0, len(eval(df_B['biblio'][i])['parties']['applicants'])):
+            try:
+                app_name.append([df_B['lens_id'][i], eval(df_B['biblio'][i])['parties']['applicants'][j]['extracted_name']['value']])
+            except: j += 1
+    except:
+        i += 1
+app_name = pd.DataFrame(app_name, columns=['lens_id','app_name'])
+
+own_name = []
+for i in range(0, len(df_B)):
+    print(f'Extract {i + 1} sur {len(df_B)}')
+    try:
+        for j in range(0, len(eval(df_B['biblio'][i])['parties']['owners_all'])):
+            try:
+                own_name.append([df_B['lens_id'][i], eval(df_B['biblio'][i])['parties']['owners_all'][j]['extracted_name']['value']])
+            except: j += 1
+    except: own_name.append([df_B['lens_id'][i], np.nan]) ; i += 1
+own_name = pd.DataFrame(own_name, columns=['lens_id','own_name'])
+
+inv_app_own_names = pd.merge(pd.merge(inv_name, app_name, how='outer'), own_name, how="outer")
+inv_app_own_names.to_csv(f'{path}/inv_app_own_names.csv')
+# Vérification des valeurs ---------------------------------------------------------------------------------------------
+
+x = pd.merge(df_b, inv_app_own_names, on='lens_id')
+
+company_name = pd.DataFrame(company_name).sort_values(by=0).reset_index(drop=True)
